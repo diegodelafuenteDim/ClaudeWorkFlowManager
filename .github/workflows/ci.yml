@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  linux:
+    name: Linux · Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.9 es el piso declarado en el README; 3.12 la version corriente.
+        python-version: ["3.9", "3.12"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Instalar herramientas
+        run: python -m pip install --quiet ruff pytest
+      - name: Lint (ruff)
+        run: ruff check .
+      - name: Tests
+        run: python -m pytest -q
+      - name: Sintaxis de monitor-app.sh (sh estricto y dash)
+        run: |
+          sh -n monitor-app.sh
+          dash -n monitor-app.sh
+      - name: Smoke test del server
+        run: |
+          python workflow-monitor/server.py 8787 &
+          for i in $(seq 1 20); do
+            if curl -sf http://127.0.0.1:8787/api/ping | grep -q workflow-monitor; then
+              echo "server OK"; exit 0
+            fi
+            sleep 0.4
+          done
+          echo "el server no respondio" >&2
+          exit 1
+
+  windows:
+    name: Windows · PowerShell 5.1
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Instalar herramientas
+        run: python -m pip install --quiet pytest
+      - name: Tests
+        run: python -m pytest -q
+      - name: Los .ps1 son ASCII puro y parsean (regla de CONTRIBUTING)
+        shell: powershell
+        run: |
+          $fallas = 0
+          Get-ChildItem -Recurse -Filter *.ps1 | ForEach-Object {
+            $b = [System.IO.File]::ReadAllBytes($_.FullName)
+            $altos = @($b | Where-Object { $_ -gt 127 }).Count
+            $e = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$null, [ref]$e)
+            if ($altos -gt 0) { Write-Host "NO-ASCII: $($_.FullName) ($altos bytes altos)"; $fallas++ }
+            if ($e) { Write-Host "SINTAXIS: $($_.FullName): $($e[0].Message)"; $fallas++ }
+          }
+          if ($fallas -gt 0) { exit 1 }
+      - name: PSScriptAnalyzer (severidad Error)
+        shell: powershell
+        run: |
+          Install-Module PSScriptAnalyzer -Force -Scope CurrentUser
+          $r = Invoke-ScriptAnalyzer -Path . -Recurse -Severity Error
+          if ($r) { $r | Format-Table -AutoSize | Out-String | Write-Host; exit 1 }

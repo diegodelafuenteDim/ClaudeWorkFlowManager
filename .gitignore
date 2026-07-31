@@ -1,0 +1,23 @@
+*.log
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Artefactos del build del exe (build-exe.ps1). El binario no se versiona:
+# se recompila con `powershell -File workflow-monitor\build-exe.ps1`.
+dist/
+build/
+.buildvenv/
+*.spec
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+
+# Config local de Claude Code de cada clon (permisos personales, no se comparte)
+.claude/settings.local.json
+
+# Caches de tooling
+.pytest_cache/
+.ruff_cache/

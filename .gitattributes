@@ -1,0 +1,3 @@
+# Los .sh tienen que salir del checkout con LF en cualquier SO:
+# con CRLF el kernel de Linux/macOS no encuentra el interprete del shebang.
+*.sh text eol=lf

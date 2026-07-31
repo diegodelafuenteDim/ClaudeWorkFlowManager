@@ -1,0 +1,19 @@
+# Config de tooling. El proyecto no se empaqueta: server.py se corre directo
+# (o se compila con PyInstaller via workflow-monitor/build-exe.ps1).
+
+[tool.ruff]
+line-length = 120
+target-version = "py39"
+
+[tool.ruff.lint]
+# Errores y pyflakes como base; sin reglas de estilo opinionadas que peleen
+# con las decisiones documentadas del codigo.
+select = ["E", "F", "W"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+# Para el analisis estatico del editor: los modulos viven en workflow-monitor/
+# (los tests los importan via el sys.path que agrega tests/conftest.py).
+[tool.pyright]
+extraPaths = ["workflow-monitor"]

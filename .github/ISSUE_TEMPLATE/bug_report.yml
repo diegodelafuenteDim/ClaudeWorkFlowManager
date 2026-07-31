@@ -1,0 +1,38 @@
+name: Reporte de bug
+description: Algo no funciona como debería
+labels: [bug]
+body:
+  - type: textarea
+    id: que-paso
+    attributes:
+      label: Qué pasó
+      description: Qué hiciste, qué esperabas que pasara y qué pasó en cambio.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduccion
+    attributes:
+      label: Pasos para reproducir
+      placeholder: |
+        1. Ejecutar `monitor-app.cmd` (o `./monitor-app.sh` en Linux/macOS)
+        2. ...
+    validations:
+      required: true
+  - type: input
+    id: entorno
+    attributes:
+      label: Entorno
+      description: SO y versión (Windows/Linux/macOS) y versión de Python. En Windows, sumá la versión de PowerShell o indicá si usás el exe compilado.
+      placeholder: "Windows 11 + PowerShell 5.1 + Python 3.12 · Ubuntu 24.04 + Python 3.12 · WorkflowMonitor.exe"
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs o capturas
+      description: >
+        Salida de consola del server o captura del dashboard. OJO: el monitor muestra
+        contenido de tus conversaciones de Claude Code — no pegues prompts o transcripts
+        con información sensible.
+    validations:
+      required: false

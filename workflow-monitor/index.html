@@ -1,0 +1,517 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>Workflow Monitor</title>
+<style>
+  :root {
+    --bg: #12151a; --panel: #1a1f27; --panel2: #20262f; --border: #2c3440;
+    --fg: #d7dde5; --muted: #7d8794; --accent: #5aa9e6;
+    --ok: #4cc38a; --warn: #e5b567; --bad: #e5726a; --done: #8a93a6;
+    /* fondos con alpha de cada color base (badges, banner, marks) */
+    --ok-bg: rgba(76,195,138,.16);
+    --done-bg: rgba(138,147,166,.16);
+    --bad-bg: rgba(229,114,106,.14);
+    --warn-bg: rgba(229,181,103,.15);
+    --muted-bg: rgba(125,135,148,.12);
+    --accent-bg: rgba(90,169,230,.3);
+    --row-border: #1e242d;   /* borde de fila, mas sutil que --border */
+    --hover: #1d232c;        /* fondo hover de filas y hits */
+    --sel: #223041;          /* fila seleccionada */
+    --code-bg: #151a21;      /* fondo de los <pre> de prompt/molde/script */
+    --fam-bg: #1b2029;       /* fila de familia */
+    --fam-hover: #212936;
+    --mark-fg: #d9ecfb;      /* texto dentro de <mark> */
+  }
+  * { box-sizing: border-box; }
+  /* columna: el header ocupa lo que necesite y main se queda con el resto REAL del viewport.
+     Con height: calc(100vh - 49px) el alto estaba clavado a un header de una sola linea: en
+     cuanto los controles pasaban a dos lineas aparecia scroll de pagina y los dos paneles
+     quedaban cortados por abajo. */
+  body { margin: 0; height: 100vh; display: flex; flex-direction: column; background: var(--bg); color: var(--fg); font: 13px/1.45 "Segoe UI", system-ui, sans-serif; }
+  header { display: flex; gap: 14px; align-items: center; padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--border); flex: none; z-index: 5; flex-wrap: wrap; }
+  header h1 { font-size: 15px; margin: 0 8px 0 0; font-weight: 600; }
+  header .hint { color: var(--muted); font-size: 12px; margin-left: auto; }
+  #offline { display: none; background: var(--bad-bg); color: var(--bad); border-bottom: 1px solid var(--border); padding: 6px 16px; font-size: 12.5px; flex: none; }
+  select, input[type=text] { background: var(--panel2); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 5px 8px; font-size: 12.5px; }
+  label.chk { color: var(--muted); font-size: 12.5px; display: flex; gap: 5px; align-items: center; cursor: pointer; white-space: nowrap; }
+  main { display: grid; grid-template-columns: minmax(340px, 34%) 1fr; gap: 0; flex: 1; min-height: 0; }
+  td.mision { max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  section { overflow: auto; }
+  #left { border-right: 1px solid var(--border); }
+  table { width: 100%; border-collapse: collapse; }
+  th { text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); padding: 7px 10px; position: sticky; top: 0; background: var(--bg); border-bottom: 1px solid var(--border); }
+  td { padding: 6px 10px; border-bottom: 1px solid var(--row-border); vertical-align: top; }
+  tr.row { cursor: pointer; }
+  tr.row:hover td { background: var(--hover); }
+  tr.sel td { background: var(--sel) !important; }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .badge { display: inline-block; padding: 1px 8px; border-radius: 9px; font-size: 11px; font-weight: 600; }
+  .b-ACTIVO { background: var(--ok-bg); color: var(--ok); }
+  .b-TERMINADO { background: var(--done-bg); color: var(--done); }
+  .b-ESTANCADO, .b-MUERTO { background: var(--bad-bg); color: var(--bad); }
+  .b-LENTO { background: var(--warn-bg); color: var(--warn); }
+  .b-REEMPLAZADO { background: var(--muted-bg); color: var(--muted); }
+  .wf { font-weight: 600; }
+  .sub { color: var(--muted); font-size: 11.5px; }
+  .pulse { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--ok); margin-right: 6px; animation: pu 1.4s infinite; }
+  @keyframes pu { 0%,100% { opacity: 1 } 50% { opacity: .25 } }
+  #detail { padding: 0 0 14px; display: flex; flex-direction: column; }
+  #detail .head { padding: 9px 14px; border-bottom: 1px solid var(--border); background: var(--panel); display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+  #agentsBox { overflow: auto; }
+  #feed { margin: 0; padding: 10px 14px; font: 12px/1.55 Consolas, monospace; white-space: pre-wrap; word-break: break-all; overflow: auto; flex: 1; min-height: 120px; border-top: 1px solid var(--border); }
+  #feed .t-TOOL { color: var(--accent); }
+  #feed .t-DICE { color: var(--warn); }
+  #feed .t-RES { color: var(--muted); }
+  .empty { color: var(--muted); padding: 26px; text-align: center; }
+  /* plan declarado del workflow (el meta de su script) */
+  #planBox { flex: none; }
+  .plan { padding: 10px 14px; border-bottom: 1px solid var(--border); background: var(--panel2); }
+  .plan .pd { margin-top: 3px; }
+  .plan ol.fases { margin: 8px 0 6px; padding-left: 0; list-style: none; counter-reset: fase; }
+  .plan ol.fases li { counter-increment: fase; padding: 3px 0 3px 30px; position: relative; }
+  .plan ol.fases li::before { content: counter(fase); position: absolute; left: 0; top: 3px;
+    width: 20px; height: 20px; border-radius: 50%; background: var(--bg); color: var(--muted);
+    border: 1px solid var(--border); font-size: 11px; text-align: center; line-height: 18px; }
+  a.back { color: var(--accent); cursor: pointer; text-decoration: none; font-size: 12px; }
+  a.back:hover { text-decoration: underline; }
+  /* foco visible para todo lo operable por teclado (ver accesibilizar() al final del script) */
+  a.back:focus-visible, .tabs a:focus-visible, tr.row:focus-visible, .hit:focus-visible {
+    outline: 2px solid var(--accent); outline-offset: -2px; }
+  /* --- prompts --- */
+  .tabs { display: inline-flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+  .tabs a { padding: 3px 11px; font-size: 12px; color: var(--muted); cursor: pointer; }
+  .tabs a.sel { background: var(--panel2); color: var(--accent); font-weight: 600; }
+  .pmeta { padding: 5px 14px; background: var(--panel2); border-bottom: 1px solid var(--border); color: var(--muted); font-size: 11.5px; overflow-wrap: anywhere; }
+  /* pre-wrap + anywhere: hay prompts con una sola linea de 380.000 caracteres */
+  pre.prompt { margin: 0; padding: 12px 16px; font: 12.5px/1.6 Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; overflow: auto; max-height: 56vh; background: var(--code-bg); border-top: 1px solid var(--border); }
+  #promptMas { padding: 8px 16px; background: var(--code-bg); }
+  pre.molde { margin: 0; padding: 9px 16px 12px; font: 11.5px/1.5 Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; overflow: auto; max-height: 26vh; color: var(--muted); background: var(--code-bg); }
+  /* fixed: si no, el <pre> del molde y los previews estiran la tabla y aparece scroll horizontal */
+  table.fams { table-layout: fixed; }
+  tr.fam td { background: var(--fam-bg); }
+  tr.fam:hover td { background: var(--fam-hover); }
+  td.tit { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .varv { font: 11.5px/1.5 Consolas, monospace; color: var(--fg); opacity: .85; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .hit { padding: 9px 16px; border-bottom: 1px solid var(--row-border); cursor: pointer; }
+  .hit:hover { background: var(--hover); }
+  .ctx { font: 11.5px/1.55 Consolas, monospace; margin-top: 3px; overflow-wrap: anywhere; }
+  .ctx mark { background: var(--accent-bg); color: var(--mark-fg); border-radius: 2px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Workflow Monitor</h1>
+  <select id="fProy" onchange="pintarRuns()"><option value="">Todos los proyectos</option></select>
+  <input type="text" id="fBusca" placeholder="filtrar por nombre / run / sesion" size="22" oninput="pintarRuns()">
+  <label class="chk"><input type="checkbox" id="fActivos" checked onchange="pintarRuns()"> solo activos</label>
+  <label class="chk"><input type="checkbox" id="fHoy" checked onchange="pintarRuns()"> últimas 24 h</label>
+  <label class="chk"><input type="checkbox" id="fAuto" checked> auto-refresh</label>
+  <input type="text" id="fPrompt" placeholder="buscar texto en TODOS los prompts…" size="26"
+         onkeydown="if (event.key === 'Enter') buscarPrompts()">
+  <a class="back" onclick="buscarPrompts()">buscar en prompts</a>
+  <span class="hint" id="reloj"></span>
+</header>
+<div id="offline">Sin conexión con el server — mostrando datos viejos. Si lo bajaste, levantalo de nuevo con el launcher; el dashboard reintenta solo.</div>
+<main>
+  <section id="left">
+    <table>
+      <thead><tr><th>Workflow / Run</th><th>Proyecto · Sesión</th><th>Estado</th><th class="num">Agentes</th><th>Últ. act</th></tr></thead>
+      <tbody id="runs"></tbody>
+    </table>
+  </section>
+  <section id="detail"><div class="empty">Elegí un run a la izquierda →</div></section>
+</main>
+<script>
+const $ = s => document.querySelector(s);
+let runs = [], selRun = null, selAgent = null;
+let proysVistos = "";   // firma del ultimo set de proyectos pintado en #fProy
+let mostrarTerminados = false, tailOn = true;
+// Estado del visor de prompts. El prompt es inmutable: se monta una vez y ningun tick lo repinta.
+let vistaAgente = "feed", agrupar = false, famAbiertas = new Set();
+let promptData = null, promptCompleto = false, soloVariable = false, enBusqueda = false;
+
+const fmtEdad = s => s < 90 ? s + "s" : s < 5400 ? Math.round(s/60) + "m" : Math.round(s/3600) + "h";
+const ESCAPES = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
+// Los prompts traen <, &, comillas de los dos tipos y backticks: escape completo o el
+// render miente (un &lt; literal se mostraria decodificado) y los title=/onclick= se rompen.
+const esc = t => String(t == null ? "" : t).replace(/[&<>"']/g, c => ESCAPES[c]);
+// Ids de run/agente van interpolados dentro de onclick='...': se filtran a su charset valido
+// (el server valida el mismo charset antes de tocar disco) en vez de escaparlos — un id con
+// comillas o backslash rompia el atributo aunque esc() lo pasara.
+const idsafe = t => String(t == null ? "" : t).replace(/[^A-Za-z0-9_.-]/g, "");
+const kb = n => n < 1024 ? n + " car." : (n / 1024).toFixed(1) + " KB";
+
+async function j(url) {
+  try {
+    const r = await fetch(url);   // el server contesta JSON en todos los status (404 incluido)
+    const data = await r.json();
+    setConexion(true);
+    return data;
+  } catch (e) {                   // rechazo de red o cuerpo ilegible: el server no esta
+    setConexion(false);
+    throw e;
+  }
+}
+function setConexion(ok) { $("#offline").style.display = ok ? "none" : "block"; }
+
+async function cargarRuns() {
+  runs = await j("/api/runs");
+  const proys = [...new Set(runs.map(r => r.proyecto))].sort();
+  // Reconstruir las <option> cierra el dropdown si esta abierto: solo si el set cambio.
+  const firma = proys.join("\u0000");   // separador que no aparece en nombres de proyecto
+  if (firma !== proysVistos) {
+    proysVistos = firma;
+    const sel = $("#fProy"), cur = sel.value;
+    sel.innerHTML = '<option value="">Todos los proyectos</option>' + proys.map(p => `<option${p===cur?" selected":""}>${esc(p)}</option>`).join("");
+    // Si el proyecto elegido desaparecio, el select volvio a "Todos": el pintarRuns()
+    // incondicional de abajo ya repinta coherente.
+  }
+  pintarRuns();
+  $("#reloj").textContent = "actualizado " + new Date().toLocaleTimeString();
+}
+
+// innerHTML que no rompe el teclado: si el markup no cambio, no toca el DOM; si cambio
+// y el foco estaba adentro, lo restaura por data-k. Sin esto, el repintado de cada tick
+// destruia el elemento enfocado y el usuario que tabulaba perdia su posicion cada 4 s.
+function repintar(el, html) {
+  if (el.__html === html) return;
+  const foco = document.activeElement;
+  const clave = el.contains(foco) ? foco.getAttribute("data-k") : null;
+  el.innerHTML = html; el.__html = html;
+  if (clave) { const n = el.querySelector(`[data-k="${clave}"]`); if (n) n.focus(); }
+}
+
+function pintarRuns() {
+  const proy = $("#fProy").value, txt = $("#fBusca").value.toLowerCase();
+  const soloAct = $("#fActivos").checked, hoy = $("#fHoy").checked;
+  const filas = runs.filter(r =>
+    (!proy || r.proyecto === proy) &&
+    (!soloAct || r.estado === "ACTIVO" || r.run === selRun) &&
+    (!hoy || r.edadSeg < 86400 || r.run === selRun) &&
+    (!txt || (r.workflow + r.run + r.sesion + r.proyecto).toLowerCase().includes(txt)));
+  repintar($("#runs"), filas.map(r => `
+    <tr class="row ${r.run===selRun?"sel":""}" data-k="${idsafe(r.run)}" onclick="verRun('${idsafe(r.run)}')">
+      <td><span class="wf">${r.estado==="ACTIVO"?'<span class="pulse"></span>':""}${esc(r.workflow) || "(sin nombre)"}</span><br><span class="sub">${r.run}</span></td>
+      <td>${esc(r.proyecto)}<br><span class="sub">${r.sesion}</span></td>
+      <td><span class="badge b-${r.estado}">${r.estado}</span></td>
+      <td class="num">${r.listos}/${r.agentes}</td>
+      <td>${r.ultimaAct}<br><span class="sub">hace ${fmtEdad(r.edadSeg)}</span></td>
+    </tr>`).join("") || `<tr><td colspan="5" class="empty">Nada con estos filtros${soloAct ? " — destildá “solo activos” para ver el historial" : ""}</td></tr>`);
+}
+
+function verRun(id) {
+  selRun = id; selAgent = null; enBusqueda = false; famAbiertas = new Set(); pintarRuns();
+  $("#detail").innerHTML = `<div class="head" id="runHead"></div><div id="planBox"></div><div id="agentsBox"></div><div id="feedWrap"></div>`;
+  refrescarRun();
+  cargarPlan(id);   // una sola vez por run: el plan no cambia, no entra en el refresco de 4s
+}
+
+// -------- plan declarado del workflow --------
+let planActual = null;
+
+const SIN_PLAN = {
+  "sueltos": "Agentes sueltos: no salieron de un workflow, así que no hay plan declarado.",
+  "sin-script": "Este run no dejó su script en disco, así que no se puede mostrar su plan.",
+  "ilegible": "El script existe pero no se pudo leer (ruta demasiado larga o sin permisos).",
+  "sin-meta": "El script no declara un bloque meta, así que no hay plan que mostrar.",
+};
+
+async function cargarPlan(run) {
+  planActual = null;
+  const box = $("#planBox");
+  if (box) box.innerHTML = "";
+  const d = await j("/api/plan?run=" + encodeURIComponent(run));
+  if (run !== selRun) return;                          // llegó tarde: ya hay otro run seleccionado
+  planActual = d.error ? null : d;
+  pintarPlan();
+}
+
+function pintarPlan() {
+  const box = $("#planBox");
+  if (!box || !planActual) return;
+  const d = planActual;
+  if (!d.plan) {
+    box.innerHTML = `<div class="plan"><span class="sub">${esc(SIN_PLAN[d.motivo] || "Sin plan disponible.")}</span></div>`;
+    return;
+  }
+  const p = d.plan;
+  const fases = p.fases.length
+    ? `<ol class="fases">${p.fases.map(f => `<li><b>${esc(f.titulo)}</b>${
+        f.detalle ? ` <span class="sub">— ${esc(f.detalle)}</span>` : ""}${
+        f.model ? ` <span class="sub">[${esc(f.model)}]</span>` : ""}</li>`).join("")}</ol>`
+    : `<div class="sub pd">El plan no declara fases.</div>`;
+  // El progreso va SEPARADO de las fases a propósito: en disco no queda registro de a qué fase
+  // pertenece cada agente, y con pipeline() se solapan. Cruzarlos sería inventar la progresión.
+  box.innerHTML = `<div class="plan">
+    <b>${esc(p.nombre) || d.run}</b> <span class="sub">— plan declarado</span>
+    ${p.descripcion ? `<div class="sub pd">${esc(p.descripcion)}</div>` : ""}
+    ${fases}
+    <span class="sub">${d.agentes} agentes · ${d.terminados} terminados</span>
+    ${d.script ? `<a class="back" style="margin-left:10px" onclick="verScript()">ver script</a>` : ""}
+  </div>`;
+}
+
+const INACTIVOS = ["TERMINADO", "MUERTO", "REEMPLAZADO"];
+
+async function refrescarRun() {
+  if (!selRun) return;
+  const pedido = selRun;
+  const [d, fam] = await Promise.all([j("/api/run?id=" + pedido), agrupar ? j("/api/prompts?run=" + pedido) : null]);
+  if (pedido !== selRun) return;                       // llego tarde: ya hay otro run seleccionado
+  const head = $("#runHead"), box = $("#agentsBox");
+  if (!head || !box) return;
+  if (d.error) { box.innerHTML = `<div class="empty">${esc(d.error)}</div>`; return; }
+  const ags = d.agentes.filter(a => mostrarTerminados || !INACTIVOS.includes(a.estado));
+  const ocultos = d.agentes.length - ags.length;
+  repintar(head, `<b>${esc(d.workflow) || d.run}</b> <span class="sub">${d.run}</span>
+    <label class="chk"><input type="checkbox" data-k="chk-term" ${mostrarTerminados?"checked":""}
+      onchange="mostrarTerminados=this.checked;refrescarRun()"> mostrar terminados/muertos${ocultos ? ` (${ocultos})` : ""}</label>
+    <label class="chk"><input type="checkbox" data-k="chk-fam" ${agrupar?"checked":""}
+      onchange="agrupar=this.checked;refrescarRun()"> agrupar por familia de prompt</label>
+    ${selRun.startsWith("wf_") ? '<a class="back" data-k="lnk-script" onclick="verScript()">ver script del workflow</a>' : ""}`);
+  repintar(box, agrupar && fam && !fam.error ? tablaFamilias(fam, d) : tablaAgentes(ags));
+}
+
+function tablaAgentes(ags) {
+  return `<table>
+    <thead><tr><th>Agente</th><th>Misión</th><th>Estado</th><th class="num">KB</th><th>Actividad actual</th><th></th></tr></thead>
+    <tbody>${ags.map(a => `
+      <tr class="row" data-k="${idsafe(a.id)}" onclick="verAgente('${idsafe(a.id)}')">
+        <td class="sub">${a.id.slice(0,10)}</td>
+        <td class="mision" title="${esc(a.mision)}">${esc(a.mision)}</td>
+        <td><span class="badge b-${a.estado}">${a.estado}</span> <span class="sub">hace ${fmtEdad(a.edadSeg)}</span></td>
+        <td class="num">${a.kb}</td>
+        <td class="sub">${esc(a.actividad) || "—"}</td>
+        <td><a class="back" data-k="p-${idsafe(a.id)}" onclick="event.stopPropagation();abrirPrompt(selRun,'${idsafe(a.id)}')">prompt${a.promptChars ? ` <span class="sub">${kb(a.promptChars)}</span>` : ""}</a></td>
+      </tr>`).join("") || '<tr><td colspan="6" class="empty">Sin agentes en curso — tildá "mostrar terminados/muertos"</td></tr>'}
+    </tbody>
+  </table>`;
+}
+
+// Un fan-out de 103 agentes son en general 5 moldes con la parte variable cambiada:
+// mostramos la familia (molde comun) y, al abrirla, solo lo propio de cada agente.
+function tablaFamilias(fam, d) {
+  const est = {};
+  (d.agentes || []).forEach(a => est[a.id] = a);
+  return `<table class="fams">
+    <colgroup><col style="width:52%"><col style="width:9%"><col style="width:9%"><col style="width:9%"><col style="width:21%"></colgroup>
+    <thead><tr><th>Familia de prompt</th><th class="num">Agentes</th><th class="num">Molde</th><th class="num">Propio</th><th>Estados</th></tr></thead>
+    <tbody>${fam.familias.map((f, i) => {
+      const abierta = famAbiertas.has(i);
+      const cuenta = {};
+      f.agentes.forEach(a => { const e = (est[a.id] || {}).estado || "?"; cuenta[e] = (cuenta[e] || 0) + 1; });
+      const varProm = Math.round(f.agentes.reduce((s, a) => s + a.varChars, 0) / f.agentes.length);
+      // La parte comun es prefijo + SUFIJO: mostrar solo el prefijo hacia decir "molde 166 car."
+      // cuando lo compartido eran 30 KB (el contrato de interfaz suele ir al final del prompt).
+      const comun = (f.pre || 0) + (f.suf || 0);
+      let filas = `<tr class="row fam" data-k="fam-${i}" onclick="toggleFam(${i})">
+          <td class="tit" title="${esc(f.titulo)}">${abierta ? "▾" : "▸"} ${esc(f.titulo)}</td>
+          <td class="num">${f.n}</td>
+          <td class="num">${comun ? kb(comun) : "—"}</td>
+          <td class="num">${f.identicos && f.n > 1 ? "idénticos" : kb(varProm)}</td>
+          <td>${Object.keys(cuenta).map(e => `<span class="badge b-${e}">${cuenta[e]} ${e}</span>`).join(" ")}</td>
+        </tr>`;
+      if (abierta) {
+        if (comun) filas += `<tr><td colspan="5" style="padding:0">
+          ${f.pre ? `<div class="sub" style="padding:6px 16px 0">molde común — comienzo (${kb(f.moldeChars)}${f.molde.length < f.pre ? `, muestro los primeros ${kb(f.molde.length)}` : ""}):</div>
+          <pre class="molde">
+${esc(f.molde)}</pre>` : ""}
+          ${f.suf >= 40 ? `<div class="sub" style="padding:6px 16px 0">molde común — final compartido (${kb(f.suf)}${f.moldeSuf.length < f.suf ? `, muestro los primeros ${kb(f.moldeSuf.length)}` : ""}):</div>
+          <pre class="molde">
+${esc(f.moldeSuf)}</pre>` : ""}</td></tr>`;
+        filas += f.agentes.map(a => {
+          const e = est[a.id] || {};
+          return `<tr class="row" data-k="${idsafe(a.id)}" onclick="abrirPrompt(selRun,'${idsafe(a.id)}')">
+            <td style="padding-left:26px"><span class="sub">${a.id.slice(0,10)} · ${a.ts}</span>
+              <div class="varv" title="${esc(a.variable)}">${esc(a.variable) || "(sin parte propia: recibió el molde tal cual)"}</div></td>
+            <td></td><td></td>
+            <td class="num">${kb(a.varChars)}</td>
+            <td>${e.estado ? `<span class="badge b-${e.estado}">${e.estado}</span>` : ""}
+                <a class="back" onclick="event.stopPropagation();verAgente('${idsafe(a.id)}')">feed</a></td>
+          </tr>`;
+        }).join("");
+      }
+      return filas;
+    }).join("") || '<tr><td colspan="5" class="empty">Este run todavía no tiene prompts legibles</td></tr>'}
+    ${fam.sinPrompt ? `<tr><td colspan="5" class="sub" style="padding:7px 16px">
+      ${fam.sinPrompt} agente${fam.sinPrompt > 1 ? "s" : ""} sin línea 0 legible todavía (recién
+      spawneado o transcript ilegible): no entra${fam.sinPrompt > 1 ? "n" : ""} en ninguna familia —
+      destildá “agrupar” para verlo${fam.sinPrompt > 1 ? "s" : ""}.</td></tr>` : ""}
+    </tbody>
+  </table>`;
+}
+
+function toggleFam(i) {
+  famAbiertas.has(i) ? famAbiertas.delete(i) : famAbiertas.add(i);
+  refrescarRun();
+}
+
+async function verAgente(id) {
+  selAgent = id; vistaAgente = "feed";
+  await refrescarFeed(true);
+}
+
+async function refrescarFeed(primeraVez) {
+  if (!selRun || !selAgent) return;
+  const pedido = selAgent;
+  const d = await j(`/api/agent?run=${encodeURIComponent(selRun)}&id=${encodeURIComponent(pedido)}`);
+  if (d.error || pedido !== selAgent || vistaAgente !== "feed") return;   // respuesta vieja: descartar
+  const wrap = $("#feedWrap");
+  if (!wrap) return;
+  wrap.innerHTML = `
+    <div class="head"><a class="back" onclick="selAgent=null;verRun(selRun)">← volver</a>
+      ${tabsHTML()}
+      <b>${esc(d.mision)}</b> <span class="sub">${d.agente}</span>
+      <label class="chk"><input type="checkbox" ${tailOn?"checked":""}
+        onchange="tailOn=this.checked; if(tailOn) refrescarFeed(true)"> seguir el final (tail&nbsp;-f)</label>
+    </div>
+    <div id="feed" style="max-height:52vh">${d.eventos.map(e =>
+      `<div class="t-${e.tipo}">${e.ts}  ${e.tipo.padEnd(4)} ${esc(e.txt)}</div>`).join("")}</div>`;
+  const feed = $("#feed");
+  if (tailOn || primeraVez) feed.scrollTop = feed.scrollHeight;
+}
+
+const tabsHTML = () => `<span class="tabs">
+  <a class="${vistaAgente==="feed"?"sel":""}"${vistaAgente==="feed"?' aria-current="true"':""} onclick="cambiarVista('feed')">feed</a>
+  <a class="${vistaAgente==="prompt"?"sel":""}"${vistaAgente==="prompt"?' aria-current="true"':""} onclick="cambiarVista('prompt')">prompt</a></span>`;
+
+function cambiarVista(v) {
+  vistaAgente = v;
+  if (v === "prompt") abrirPrompt(selRun, selAgent); else verAgente(selAgent);
+}
+
+async function abrirPrompt(run, id) {
+  if (!run || !id) return;
+  if (selRun !== run || enBusqueda) verRun(run);      // reconstruye #detail (y sale de la busqueda)
+  selRun = run; selAgent = id; vistaAgente = "prompt";
+  promptCompleto = false; soloVariable = false; promptData = null;
+  const wrap = $("#feedWrap");
+  if (wrap) wrap.innerHTML = `<div class="head"><span class="sub">cargando prompt…</span></div>`;
+  const d = await j(`/api/prompt?run=${encodeURIComponent(run)}&id=${encodeURIComponent(id)}`);
+  if (selAgent !== id || selRun !== run || vistaAgente !== "prompt") return;
+  const w = $("#feedWrap");
+  if (!w) return;
+  if (d.error) { w.innerHTML = `<div class="head"><a class="back" onclick="verRun(selRun)">← volver</a></div><div class="empty">${esc(d.error)}</div>`; return; }
+  promptData = d;
+  const propio = (d.pre || d.suf) && d.familia > 1;
+  w.innerHTML = `
+    <div class="head"><a class="back" onclick="selAgent=null;verRun(selRun)">← volver</a>
+      ${tabsHTML()}
+      <b>${esc(d.titulo || d.description || d.agente)}</b>
+      <span class="sub">${d.agente} · ${kb(d.chars)}${d.ts ? " · " + d.ts : ""}</span>
+      ${propio ? `<label class="chk"><input type="checkbox" ${soloVariable?"checked":""}
+        onchange="soloVariable=this.checked;promptCompleto=false;pintarPrompt()">
+        solo lo propio de este agente <span class="sub">(la familia comparte ${kb(d.pre + d.suf)})</span></label>` : ""}
+      ${d.aviso ? `<span class="sub">${esc(d.aviso)}</span>` : ""}
+    </div>
+    <div class="pmeta">${[d.agentType && esc(d.agentType), d.description && esc(d.description),
+        d.cwd && "cwd: " + esc(d.cwd), d.gitBranch && "branch: " + esc(d.gitBranch),
+        d.slug && esc(d.slug), d.version && "cli " + esc(d.version),
+        d.aviso ? "" : (d.familia > 1 ? `familia de ${d.familia} agentes` : "prompt único en el run"),
+        d.truncado ? "⚠ línea 0 truncada al leer" : ""].filter(Boolean).join(" · ")}</div>
+    <pre class="prompt" id="promptTxt"></pre><div id="promptMas"></div>`;
+  pintarPrompt();
+}
+
+// textContent, nunca innerHTML: es un volcado literal y hay prompts con <script>, & y backticks.
+function pintarPrompt() {
+  const box = $("#promptTxt"), mas = $("#promptMas");
+  if (!box || !promptData) return;
+  let t = promptData.texto || "";
+  if (soloVariable) t = t.slice(promptData.pre || 0, promptData.suf ? t.length - promptData.suf : undefined);
+  const corta = !promptCompleto && t.length > 20000;
+  // Tres casos distintos, antes se mezclaban dos: sin prompt no hay molde que haber recibido,
+  // y la cabecera ya explica por qué (esa frase contradecía al aviso justo encima).
+  const vacio = !(promptData.texto || "").length
+    ? ""
+    : "(este agente recibió exactamente el molde de su familia, sin parte propia)";
+  box.textContent = corta ? t.slice(0, 6000) : (t || vacio);
+  mas.innerHTML = corta
+    ? `<a class="back" onclick="promptCompleto=true;pintarPrompt()">mostrar el texto completo (${kb(t.length)}) ↓</a>
+       <span class="sub">— se muestran los primeros 6.000 caracteres</span>`
+    : "";
+  box.scrollTop = 0;
+}
+
+async function verScript() {
+  if (!selRun) return;
+  const d = await j("/api/script?run=" + encodeURIComponent(selRun));
+  const w = $("#feedWrap");
+  if (!w) return;
+  if (d.error) { w.innerHTML = `<div class="head"><span class="sub">${esc(d.error)}</span></div>`; return; }
+  selAgent = null; vistaAgente = "feed"; promptData = null;
+  w.innerHTML = `<div class="head"><a class="back" onclick="verRun(selRun)">← volver</a>
+      <b>${esc(d.nombre)}</b> <span class="sub">script del workflow · ${kb(d.chars)}</span></div>
+    <pre class="prompt" id="scriptTxt"></pre>`;
+  $("#scriptTxt").textContent = d.texto;
+}
+
+// -------- busqueda global sobre todos los prompts --------
+async function buscarPrompts() {
+  const q = $("#fPrompt").value.trim();
+  if (q.length < 2) return;
+  enBusqueda = true; selAgent = null;
+  $("#detail").innerHTML = `<div class="head"><b>Buscando “${esc(q)}” en todos los prompts…</b></div>`;
+  const proy = $("#fProy").value;
+  const d = await j("/api/search?q=" + encodeURIComponent(q) + (proy ? "&proyecto=" + encodeURIComponent(proy) : ""));
+  if (!enBusqueda) return;
+  if (d.error) { $("#detail").innerHTML = `<div class="empty">${esc(d.error)}</div>`; return; }
+  $("#detail").innerHTML = `
+    <div class="head"><b>“${esc(d.q)}”</b>
+      <span class="sub">${d.agentes} agentes · ${d.ocurrencias} ocurrencias · ${d.indexados} prompts leídos · ${d.ms} ms${d.truncado ? " · muestro los 200 más recientes" : ""}</span>
+      ${selRun ? '<a class="back" onclick="verRun(selRun)">← volver al run</a>' : ""}</div>
+    <div>${d.hits.map(h => `
+      <div class="hit" onclick="abrirPrompt('${idsafe(h.run)}','${idsafe(h.agente)}')">
+        <div><b>${esc(h.titulo)}</b></div>
+        <div class="sub">${esc(h.proyecto)} · ${esc(h.workflow) || h.run} · ${h.agente.slice(0,10)} · ${h.ts} · ${esc(h.agentType)}${h.description ? " · " + esc(h.description) : ""} · ${kb(h.chars)} · ${h.n} match${h.n>1?"es":""}</div>
+        ${h.ctx.map(c => `<div class="ctx">${esc(c.pre)}<mark>${esc(c.hit)}</mark>${esc(c.post)}</div>`).join("")}
+      </div>`).join("") || '<div class="empty">Ningún prompt contiene ese texto</div>'}</div>`;
+}
+
+setInterval(async () => {
+  if (!$("#fAuto").checked) return;
+  try {
+    await cargarRuns();
+    if (enBusqueda) return;                                // no pisar los resultados de busqueda
+    if (selRun) await refrescarRun();
+    // el prompt es inmutable: si esa es la vista activa, el tick no toca #feedWrap
+    if (selRun && selAgent && tailOn && vistaAgente === "feed") await refrescarFeed(false);
+  } catch (e) {}   // j() ya prendio el banner de desconexion; el proximo tick reintenta
+}, 4000);
+cargarRuns().catch(() => {});
+
+// --- operabilidad por teclado -----------------------------------------------
+// Todo lo clickeable se genera por innerHTML con onclick inline. En vez de tocar
+// cada template: un fixer que marca lo interactivo como enfocable, y un unico
+// listener delegado que traduce Enter/Space a click. Cualquier repintado futuro
+// queda cubierto por el MutationObserver sin acordarse de llamar nada.
+const INTERACTIVO = "a:not([href])[onclick], tr.row[onclick], .hit[onclick], .tabs a";
+function accesibilizar(root) {
+  // querySelectorAll solo mira descendientes: el propio root tambien puede ser
+  // interactivo (los addedNodes de un innerHTML sobre <tbody> son los <tr> mismos).
+  const els = [...root.querySelectorAll(INTERACTIVO)];
+  if (root.matches(INTERACTIVO)) els.push(root);
+  for (const el of els) {
+    if (!el.hasAttribute("tabindex")) el.setAttribute("tabindex", "0");
+    // role=button en los <a> sin href y en los hits; las <tr> conservan su
+    // semantica de tabla (un role ahi rompe el arbol de accesibilidad de <table>).
+    if (!el.matches("tr") && !el.hasAttribute("role")) el.setAttribute("role", "button");
+  }
+}
+accesibilizar(document.body);            // header estatico (buscar en prompts)
+new MutationObserver(ms => {
+  for (const m of ms) for (const n of m.addedNodes)
+    if (n.nodeType === 1) accesibilizar(n);
+}).observe(document.body, { childList: true, subtree: true });
+
+document.addEventListener("keydown", e => {
+  if (e.key !== "Enter" && e.key !== " ") return;
+  if (e.repeat) return;   // auto-repeat del teclado: un solo disparo por pulsacion
+  const t = e.target;
+  if (!(t instanceof Element) || t.closest("input, select, textarea")) return;
+  if (t.matches(INTERACTIVO)) { e.preventDefault(); t.click(); }  // preventDefault: Space no scrollea
+});
+</script>
+</body>
+</html>

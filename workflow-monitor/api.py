@@ -1,0 +1,354 @@
+"""Endpoint/domain layer of the Workflow Monitor: one api_* function per endpoint.
+
+Language convention (whole app): code is English; the HTTP contract is SPANISH
+byte-for-byte — JSON keys ("agentes", "listos", "estado", "proyecto", "mision",
+"molde", ...), state values (ACTIVO/LENTO/TERMINADO/REEMPLAZADO/MUERTO/ESTANCADO),
+event types (TOOL/DICE/RES), motivo values ('sueltos'/'sin-script'/'ilegible'/
+'sin-meta'), the 'sueltos_' run-id prefix, the '(agentes sueltos)' label and every
+error message. See server.py.
+
+ROOT is always read as fsread.ROOT (attribute access) so tests can monkeypatch it
+in one place.
+"""
+from __future__ import annotations
+
+import re
+import time
+from datetime import datetime
+from stat import S_ISREG
+
+import fsread
+import prompts
+
+# The ids come from the client and are used to build paths: validate them before
+# touching disk.
+RE_VALID_RUN_ID = re.compile(r"^(?:wf_[A-Za-z0-9_-]{1,60}|sueltos_[A-Za-z0-9-]{1,60})$")
+RE_VALID_AGENT_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+SEARCH_MAX_AGENTS = 200          # max agents returned (the real total is reported anyway)
+
+# Status thresholds, in seconds — one single place: used by run_status, api_runs and api_run.
+AGENT_ACTIVE_SECS = 60           # transcript written less than this ago -> ACTIVO
+AGENT_IDLE_SECS = 300            # idle longer than this -> MUERTO/REEMPLAZADO (loose: "listo")
+RUN_ACTIVE_SECS = 90             # some agent wrote less than this ago -> run ACTIVO
+
+
+def run_status(agents: list[dict], last_journal_type: str | None, now: float | None = None) -> str:
+    # A run that closed cleanly ends its journal with a "result"; a crashed one is left
+    # with dangling "started" lines (deaths do not write the journal).
+    # api_runs injects `now` so estado and edadSeg share one clock: the full sweep can
+    # take seconds, and a fresh time.time() here could disagree with the row's age.
+    freshest = max((a["mtime"] for a in agents), default=0)
+    if (time.time() if now is None else now) - freshest < RUN_ACTIVE_SECS:
+        return "ACTIVO"
+    if agents and last_journal_type == "result":
+        return "TERMINADO"
+    return "ESTANCADO"
+
+
+def find_run_dir(run_id: str):
+    """Directory holding the run's agent-*.jsonl. 'sueltos_<session>' -> that session's subagents.
+
+    The run_id comes from the client and goes into a glob: it is validated HERE, the one
+    point ALL endpoints pass through. /api/run and /api/agent used to glob with the raw
+    string and a '../' escaped ~/.claude (the monitor served files from anywhere on
+    disk); on top of that, an empty run matched the 'workflows' directory itself and
+    answered 200.
+    """
+    if not RE_VALID_RUN_ID.match(run_id or ""):
+        return None
+    if run_id.startswith("sueltos_"):
+        sess = run_id.removeprefix("sueltos_")
+        for sub in fsread.ROOT.glob(f"*/{sess}/subagents"):
+            return sub
+        return None
+    for run_dir in fsread.ROOT.glob(f"*/*/subagents/workflows/{run_id}"):
+        return run_dir
+    return None
+
+
+def _run_row(run: str, workflow: str, project: str, session: str,
+             agents: int, done: int, status: str, mtime: float, now: float) -> dict:
+    """Canonical shape of one /api/runs row. The only place a row formats ultimaAct
+    (prompt timestamps have their own formatter: fsread._local_ts_label)."""
+    return {"run": run, "workflow": workflow, "proyecto": project, "sesion": session,
+            "agentes": agents, "listos": done, "estado": status,
+            "ultimaAct": datetime.fromtimestamp(mtime).strftime("%d/%m %H:%M"),
+            "edadSeg": int(now - mtime)}
+
+
+def _loose_agent_runs(now: float) -> list[dict]:
+    # LOOSE agents (Agent tool / skills in background, outside workflows): they live
+    # right under <session>/subagents/agent-*.jsonl and have no journal.
+    rows = []
+    for sub in fsread.ROOT.glob("*/*/subagents"):
+        # is_file() does not protect the stat() on the next line: the file can vanish
+        # right in between (or exceed MAX_PATH) and there /api/runs returned 500, i.e.
+        # the whole dashboard went blank. A run cannot be lost over one unreachable file.
+        mtimes = []
+        for f in sub.glob("agent-*.jsonl"):
+            try:
+                st = f.stat()
+            except OSError:
+                continue
+            if S_ISREG(st.st_mode):     # we already have the mode: no extra stat on is_file()
+                mtimes.append(st.st_mtime)
+        if not mtimes:
+            continue
+        mtime = max(mtimes)
+        sess = sub.parent
+        rows.append(_run_row(
+            "sueltos_" + sess.name, "(agentes sueltos)",
+            fsread.clean_project_slug(sess.parent.name), sess.name[:8],
+            agents=len(mtimes),
+            done=sum(1 for t in mtimes if now - t > AGENT_IDLE_SECS),
+            status="ACTIVO" if now - mtime < RUN_ACTIVE_SECS else "TERMINADO",
+            mtime=mtime, now=now))
+    return rows
+
+
+def _workflow_runs(now: float) -> list[dict]:
+    rows = []
+    for run_dir in fsread.ROOT.glob("*/*/subagents/workflows/wf_*"):
+        if not run_dir.is_dir():
+            continue
+        agents = fsread.list_agent_files(run_dir)
+        ji = fsread.journal_info(run_dir)
+        try:  # same reason: a run with no agents leans on the stat of the directory itself
+            mtime = max((a["mtime"] for a in agents), default=run_dir.stat().st_mtime)
+        except OSError:
+            continue
+        rows.append(_run_row(
+            run_dir.name, fsread.workflow_name(run_dir),
+            fsread.clean_project_slug(run_dir.parents[3].name), run_dir.parents[2].name[:8],
+            agents=len(agents), done=len(ji.done_agents),
+            status=run_status(agents, ji.last_type, now), mtime=mtime, now=now))
+    return rows
+
+
+def api_runs() -> list[dict]:
+    now = time.time()
+    runs = _loose_agent_runs(now) + _workflow_runs(now)
+    runs.sort(key=lambda r: r["edadSeg"])
+    return runs
+
+
+def api_run(run_id: str) -> dict | None:
+    run_dir = find_run_dir(run_id)
+    if not run_dir:
+        return None
+    is_loose_run = run_id.startswith("sueltos_")
+    ji = fsread.JournalInfo({}, set(), set(), None) if is_loose_run else fsread.journal_info(run_dir)
+    now = time.time()
+    agents = []
+    for a in fsread.list_agent_files(run_dir):
+        age_secs = int(now - a["mtime"])
+        key = ji.key_by_agent.get(a["id"])
+        if a["id"] in ji.done_agents:
+            status = "TERMINADO"
+        elif age_secs < AGENT_ACTIVE_SECS:
+            status = "ACTIVO"
+        elif age_secs < AGENT_IDLE_SECS:
+            status = "LENTO"
+        elif key and key in ji.done_keys:
+            status = "REEMPLAZADO"  # died, but its prompt was completed by another agent (resume)
+        elif is_loose_run:
+            status = "TERMINADO"  # no journal, no way to tell finished from dead: idle = done
+        else:
+            status = "MUERTO"
+        # The mission comes from the already parsed (cached) prompt; agent_mission is the
+        # fallback for the just-spawned agent that has not written its line 0 yet.
+        e = prompts.prompt_entry(a["path"])
+        agents.append({
+            "id": a["id"], "kb": a["kb"], "edadSeg": age_secs, "estado": status,
+            "mision": prompts.mission_of(e) if e else fsread.agent_mission(a["path"]),
+            "promptChars": e["chars"] if e else 0,
+            "actividad": "" if status in ("TERMINADO", "REEMPLAZADO") else fsread.agent_activity(a["path"]),
+        })
+    return {"run": run_id if is_loose_run else run_dir.name,
+            "workflow": "(agentes sueltos)" if is_loose_run else fsread.workflow_name(run_dir),
+            "agentes": agents}
+
+
+def api_agent(run_id: str, agent_id: str, n: int = 120) -> dict | None:
+    run_dir = find_run_dir(run_id)
+    if not run_dir or not RE_VALID_AGENT_ID.match(agent_id or ""):
+        return None
+    matches = list(run_dir.glob(f"agent-{agent_id}*.jsonl"))
+    if not matches:
+        return None
+    path = matches[0]
+    events = []
+    for line in fsread.tail_lines(path):
+        ts = fsread.local_hhmmss(line)
+        if '"type":"assistant"' in line:
+            tools = fsread.RE_TOOL.findall(line)
+            if tools:
+                hint = ""
+                h = fsread.RE_HINT.search(line)
+                if h:
+                    hint = fsread.unescape(h.group(1))[:110]
+                events.append({"ts": ts, "tipo": "TOOL", "txt": f"{', '.join(tools)}  {hint}".strip()})
+            else:
+                m = fsread.RE_TEXT.search(line)
+                if m:
+                    events.append({"ts": ts, "tipo": "DICE", "txt": fsread.unescape(m.group(1))[:180]})
+        elif '"type":"user"' in line and '"type":"tool_result"' in line:
+            # preview of what the tool returned (content string or [{text:...}])
+            preview = ""
+            m = re.search(r'"tool_result".{0,120}?"(?:content|text)":"((?:[^"\\]|\\.){1,110})', line)
+            if not m:
+                m = re.search(r'"text":"((?:[^"\\]|\\.){1,110})', line)
+            if m:
+                preview = "  · " + fsread.unescape(m.group(1)).strip()
+            events.append({"ts": ts, "tipo": "RES", "txt": f"({max(1, len(line) // 1024)} KB){preview}"})
+    e = prompts.prompt_entry(path)
+    return {"agente": path.stem,
+            "mision": prompts.mission_of(e) if e else fsread.agent_mission(path),
+            "eventos": events[-n:]}
+
+
+def api_prompts(run_id: str) -> dict | None:
+    """The run's prompts grouped by family (metadata + preview; full text goes separately)."""
+    run_dir = find_run_dir(run_id)
+    if not run_dir:
+        return None
+    is_loose_run = run_id.startswith("sueltos_")
+    entries, total = prompts.run_prompts(run_dir)
+    fams = [{**f, "moldeChars": f["pre"]} for f in prompts.prompt_families(run_dir, entries)]
+    # sinPrompt: agents that exist but whose line 0 is not readable yet (the just-spawned
+    # one). Without this datum they vanished from the grouped view with no warning at all.
+    return {"run": run_id if is_loose_run else run_dir.name,
+            "workflow": "(agentes sueltos)" if is_loose_run else fsread.workflow_name(run_dir),
+            "agentes": len(entries), "sinPrompt": total - len(entries), "familias": fams}
+
+
+# Fields of /api/prompt that come straight from prompt_entry, with their value for the
+# empty fallback. ONE single list: the client interpolates every field and painted
+# "undefined" when the fallback and the full response (previously enumerated by hand,
+# separately) diverged. Keys stay Spanish: they are the API contract.
+_PROMPT_FIELDS = {"texto": "", "chars": 0, "kb": 0, "ts": "", "cwd": "", "gitBranch": "",
+                  "slug": "", "version": "", "agentType": "", "description": "",
+                  "spawnDepth": None, "truncado": False}
+
+
+def api_prompt(run_id: str, agent_id: str) -> dict | None:
+    """FULL prompt of one agent. Untruncated: the 378 KB one is precisely an interesting one."""
+    run_dir = find_run_dir(run_id)
+    if not run_dir or not RE_VALID_AGENT_ID.match(agent_id or ""):
+        return None
+    path = run_dir / f"agent-{agent_id}.jsonl"
+    try:
+        if not path.is_file():
+            return None
+    except OSError:
+        return None
+    e = prompts.prompt_entry(path)
+    if not e:
+        return {"run": run_id, "agente": agent_id, "titulo": "", **_PROMPT_FIELDS,
+                "pre": 0, "suf": 0, "familia": 1,
+                "aviso": "el agente todavia no escribio su prompt (linea 0 vacia, ilegible o "
+                         f"mas grande que {fsread.LINE0_MAX_TOTAL_BYTES // (1024 * 1024)} MB)"}
+    pre = suf = 0
+    family_size = 1
+    for f in prompts.prompt_families(run_dir, prompts.run_prompts(run_dir)[0]):
+        if any(a["id"] == e["id"] for a in f["agentes"]):
+            pre, suf, family_size = f["pre"], f["suf"], f["n"]
+            break
+    return {"run": run_id, "agente": e["id"], "titulo": prompts.title_of(e["texto"]),
+            **{k: e[k] for k in _PROMPT_FIELDS},
+            "pre": pre, "suf": suf, "familia": family_size}
+
+
+def api_search(q: str, proyecto: str = "", tipo: str = "", limit: int = SEARCH_MAX_AGENTS) -> dict:
+    """Text search over ALL the prompts. No inverted index: they are ~24 MB (the L0 of
+    2500 files, 4% of the corpus) and the full sweep takes less than building the index."""
+    q = (q or "").strip()
+    if len(q) < 2:
+        return {"error": "escribi al menos 2 caracteres"}
+    t0 = time.time()
+    pattern = prompts.search_pattern(q)
+    hits, match_count, indexed_count = [], 0, 0
+    projects, types = set(), set()
+    for path in fsread._iter_agent_paths():
+        e = prompts.prompt_entry(path)
+        if not e:
+            continue
+        indexed_count += 1
+        u = prompts._location_of(path)
+        projects.add(u["proyecto"])
+        if e["agentType"]:
+            types.add(e["agentType"])
+        if (proyecto and u["proyecto"] != proyecto) or (tipo and e["agentType"] != tipo):
+            continue
+        n, snippets = prompts._match_snippets(e["texto"], pattern)
+        if not n:
+            continue
+        match_count += n
+        hits.append({"run": u["run"], "workflow": u["workflow"], "proyecto": u["proyecto"],
+                     "sesion": u["sesion"], "agente": e["id"], "ts": e["ts"], "tsIso": e["tsIso"],
+                     "chars": e["chars"], "agentType": e["agentType"], "description": e["description"],
+                     "titulo": prompts.title_of(e["texto"], 90), "n": n, "ctx": snippets})
+    hits.sort(key=lambda h: h["tsIso"], reverse=True)
+    return {"q": q, "agentes": len(hits), "ocurrencias": match_count, "indexados": indexed_count,
+            "ms": int((time.time() - t0) * 1000), "truncado": len(hits) > limit,
+            "proyectos": sorted(projects), "tipos": sorted(types), "hits": hits[:limit]}
+
+
+def api_script(run_id: str) -> dict | None:
+    """The workflow's .js: the literal template each family's prompts come out of."""
+    run_dir = find_run_dir(run_id)
+    if not run_dir or run_id.startswith("sueltos_"):
+        return None
+    s, text = fsread._run_script(run_dir)
+    if not s or text is None:
+        return None
+    return {"run": run_dir.name, "nombre": s.name, "texto": text, "chars": len(text)}
+
+
+def api_plan(run_id: str) -> dict | None:
+    """Declared plan + REAL progress, kept separate on purpose.
+
+    One is not crossed with the other: disk keeps no record of which phase each agent
+    belongs to (the journal only carries agentId/key/result and the .meta.json
+    agentType/spawnDepth), and with pipeline() the agents of different phases overlap.
+    Inferring it would display an invented progression, so the plan is shown as declared
+    and the progress separately.
+    """
+    run_dir = find_run_dir(run_id)
+    if not run_dir:
+        return None
+    agent_files = fsread.list_agent_files(run_dir)
+    base = {"run": run_id, "agentes": len(agent_files), "terminados": 0,
+            "plan": None, "script": "", "motivo": ""}
+    if run_id.startswith("sueltos_"):
+        base["motivo"] = "sueltos"          # agents outside a workflow: no plan to show
+        return base
+    base["terminados"] = len(fsread.journal_info(run_dir).done_agents)
+    s, text = fsread._run_script(run_dir)
+    if not s:
+        base["motivo"] = "sin-script"       # 16 of 175 corpus runs: ran with no script on disk
+        return base
+    base["script"] = s.name
+    if text is None:
+        base["motivo"] = "ilegible"         # typically MAX_PATH
+        return base
+    plan = fsread.parse_plan(text)
+    if not plan:
+        base["motivo"] = "sin-meta"
+        return base
+    base["plan"] = plan
+    return base
+
+
+# Path -> (function, query params, message when it returns None). All these endpoints
+# share the None -> 404 convention: declaring them here avoids repeating the idiom in
+# do_GET. Defined LAST in the module: it references the api_* functions by name.
+ROUTES_404 = {
+    "/api/run":     (api_run,     ("id",),       "run no encontrado"),
+    "/api/agent":   (api_agent,   ("run", "id"), "agente no encontrado"),
+    "/api/prompts": (api_prompts, ("run",),      "run no encontrado"),
+    "/api/prompt":  (api_prompt,  ("run", "id"), "prompt no encontrado"),
+    "/api/script":  (api_script,  ("run",),      "este run no tiene script"),
+    "/api/plan":    (api_plan,    ("run",),      "run no encontrado"),
+}
