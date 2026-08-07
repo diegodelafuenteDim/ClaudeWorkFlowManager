@@ -200,7 +200,7 @@ def test_api_runs_integration(tmp_path, monkeypatch):
     # Freezes the JSON contract of a /api/runs row.
     for r in rows:
         assert set(r) == {"run", "workflow", "proyecto", "sesion", "agentes",
-                          "listos", "estado", "ultimaAct", "edadSeg"}
+                          "listos", "activos", "estado", "ultimaAct", "edadSeg"}
     by_run = {r["run"]: r for r in rows}
     assert set(by_run) == {"wf_abc123", "sueltos_sesionffff9999"}
 
@@ -208,12 +208,71 @@ def test_api_runs_integration(tmp_path, monkeypatch):
     assert wf_row["proyecto"] == "Demo"           # slug c--Net-8-Demo cleaned
     assert wf_row["agentes"] == 1
     assert wf_row["listos"] == 1                  # the journal has its result
+    # Freshly written, but it already has its result: done wins over recency, so the run
+    # shows 0 running. listos + activos do NOT have to add up to agentes.
+    assert wf_row["activos"] == 0
     assert wf_row["estado"] == "ACTIVO"           # just written to disk
 
     loose_row = by_run["sueltos_sesionffff9999"]
     assert loose_row["workflow"] == "(agentes sueltos)"
     assert loose_row["agentes"] == 1
     assert loose_row["estado"] == "ACTIVO"
+
+
+def test_uptime_viene_de_la_linea_0_no_del_mtime(tmp_path, monkeypatch):
+    """uptimeSeg mide desde el SPAWN; edadSeg, desde la ultima escritura.
+
+    Es la distincion que la UI confundia: un agente 12 minutos adentro de su trabajo que
+    acaba de escribir mostraba "hace 0s", que se lee como "recien arranco".
+    """
+    monkeypatch.setattr(fsread, "ROOT", tmp_path)
+    wf = tmp_path / "c--Demo" / "sesion1234abcd" / "subagents" / "workflows" / "wf_up1"
+    wf.mkdir(parents=True)
+    (wf / "journal.jsonl").write_text('{"type":"started","agentId":"aa11","key":"k1"}\n',
+                                      encoding="utf-8")
+    # Linea 0 fechada 30 minutos atras, pero el archivo se acaba de escribir.
+    spawn = time.time() - 1800
+    line0 = {"type": "user",
+             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(spawn)),
+             "message": {"content": "Sos el agente lento."}}
+    (wf / "agent-aa11.jsonl").write_text(json.dumps(line0) + "\n", encoding="utf-8")
+
+    d = api.api_run("wf_up1")
+    assert d is not None
+    a = d["agentes"][0]
+    assert a["edadSeg"] < 60                    # escribio recien
+    assert 1700 < a["uptimeSeg"] < 1900         # pero arranco hace media hora
+    assert a["estado"] == "ACTIVO"
+
+
+def test_uptime_es_none_sin_linea_0(tmp_path, monkeypatch):
+    # Agente recien spawneado: el archivo existe pero la linea 0 todavia no esta.
+    # Sin prompt no hay instante de spawn, y la UI tiene que poder omitir el dato.
+    monkeypatch.setattr(fsread, "ROOT", tmp_path)
+    wf = tmp_path / "c--Demo" / "sesion1234abcd" / "subagents" / "workflows" / "wf_up2"
+    wf.mkdir(parents=True)
+    (wf / "agent-bb22.jsonl").write_text("", encoding="utf-8")
+
+    d = api.api_run("wf_up2")
+    assert d is not None
+    a = d["agentes"][0]
+    assert a["uptimeSeg"] is None
+    assert isinstance(a["edadSeg"], int)
+
+
+def test_uptime_no_explota_con_timestamp_basura(tmp_path, monkeypatch):
+    # El archivo lo escribe otro proceso: un timestamp no-ISO no puede tumbar el endpoint.
+    monkeypatch.setattr(fsread, "ROOT", tmp_path)
+    wf = tmp_path / "c--Demo" / "sesion1234abcd" / "subagents" / "workflows" / "wf_up3"
+    wf.mkdir(parents=True)
+    for i, ts in enumerate(["no-es-fecha", "", "0000-00-00T00:00:00Z"]):
+        line0 = {"type": "user", "timestamp": ts, "message": {"content": "Sos un agente."}}
+        (wf / f"agent-cc{i}.jsonl").write_text(json.dumps(line0) + "\n", encoding="utf-8")
+
+    d = api.api_run("wf_up3")
+    assert d is not None
+    for a in d["agentes"]:
+        assert a["uptimeSeg"] is None            # sin fecha usable, pero sin 500
 
 
 def test_api_runs_missing_root(tmp_path, monkeypatch):

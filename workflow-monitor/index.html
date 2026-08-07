@@ -3,8 +3,22 @@
 <head>
 <meta charset="utf-8">
 <title>Workflow Monitor</title>
+<script>
+  // Antes del primer pintado: si no, quien tiene el sistema en claro ve un flash oscuro
+  // mientras el <script> del final todavia no corrio. La logica completa esta en aplicarTema().
+  try {
+    var p = localStorage.getItem("wfmon-tema") || "auto";
+    document.documentElement.dataset.theme =
+      p === "auto" ? (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark") : p;
+  } catch (e) {}
+</script>
 <style>
+  /* TEMA. El oscuro es el default (:root); el claro solo redefine las variables.
+     El JS resuelve "auto" a un valor CONCRETO en data-theme y escucha los cambios del
+     sistema operativo, asi que aca no hace falta duplicar la paleta clara dentro de un
+     @media prefers-color-scheme. Ver aplicarTema(). */
   :root {
+    color-scheme: dark;
     --bg: #12151a; --panel: #1a1f27; --panel2: #20262f; --border: #2c3440;
     --fg: #d7dde5; --muted: #7d8794; --accent: #5aa9e6;
     --ok: #4cc38a; --warn: #e5b567; --bad: #e5726a; --done: #8a93a6;
@@ -23,6 +37,27 @@
     --fam-hover: #212936;
     --mark-fg: #d9ecfb;      /* texto dentro de <mark> */
   }
+  :root[data-theme="light"] {
+    color-scheme: light;
+    --bg: #f6f7f9; --panel: #ffffff; --panel2: #eef1f5; --border: #d6dbe3;
+    --fg: #1f2733; --muted: #5c6675; --accent: #1663a8;
+    /* los colores de estado bajan de luminosidad: sobre fondo claro, los del tema
+       oscuro no llegan a 4.5:1 de contraste */
+    --ok: #15734a; --warn: #8a5d0b; --bad: #b0322a; --done: #626c7a;
+    --ok-bg: rgba(21,115,74,.12);
+    --done-bg: rgba(98,108,122,.13);
+    --bad-bg: rgba(176,50,42,.11);
+    --warn-bg: rgba(138,93,11,.14);
+    --muted-bg: rgba(92,102,117,.10);
+    --accent-bg: rgba(22,99,168,.22);
+    --row-border: #e5e9ef;
+    --hover: #eaeff5;
+    --sel: #d8e7f6;
+    --code-bg: #f0f2f6;
+    --fam-bg: #eaeef4;
+    --fam-hover: #e1e7ef;
+    --mark-fg: #0a2947;
+  }
   * { box-sizing: border-box; }
   /* columna: el header ocupa lo que necesite y main se queda con el resto REAL del viewport.
      Con height: calc(100vh - 49px) el alto estaba clavado a un header de una sola linea: en
@@ -38,7 +73,22 @@
   main { display: grid; grid-template-columns: minmax(340px, 34%) 1fr; gap: 0; flex: 1; min-height: 0; }
   td.mision { max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   section { overflow: auto; }
-  #left { border-right: 1px solid var(--border); }
+  /* La izquierda es una columna: la lista de runs arriba (scrollea) y el script del
+     workflow abajo. Con 2 o 3 workflows a la vez la lista es corta y ese espacio sobra;
+     antes el script se abria en el panel derecho y empujaba la tabla de agentes. */
+  #left { border-right: 1px solid var(--border); display: flex; flex-direction: column; overflow: hidden; }
+  #runsWrap { overflow: auto; flex: 1; min-height: 0; }
+  #scriptBox { flex: none; display: flex; flex-direction: column; overflow: hidden; max-height: 55%; }
+  #scriptBox:empty { display: none; }
+  #scriptBox .head { padding: 7px 12px; border-top: 1px solid var(--border);
+    border-bottom: 1px solid var(--border); background: var(--panel); display: flex;
+    gap: 10px; align-items: center; flex: none; }
+  #scriptBox .head b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #scriptBox pre { margin: 0; padding: 10px 12px; font: 11.5px/1.5 Consolas, monospace;
+    white-space: pre; overflow: auto; flex: 1; min-height: 0; background: var(--code-bg); }
+  .cerrar { margin-left: auto; cursor: pointer; color: var(--muted); font-size: 15px;
+    line-height: 1; padding: 0 2px; }
+  .cerrar:hover { color: var(--fg); }
   table { width: 100%; border-collapse: collapse; }
   th { text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); padding: 7px 10px; position: sticky; top: 0; background: var(--bg); border-bottom: 1px solid var(--border); }
   td { padding: 6px 10px; border-bottom: 1px solid var(--row-border); vertical-align: top; }
@@ -54,6 +104,14 @@
   .b-REEMPLAZADO { background: var(--muted-bg); color: var(--muted); }
   .wf { font-weight: 600; }
   .sub { color: var(--muted); font-size: 11.5px; }
+  /* lista de runs: fixed + ellipsis. Sin esto los nombres largos de proyecto
+     ("PortalGestion-portal-gestion") parten la fila en tres lineas. */
+  table.runs { table-layout: fixed; }
+  table.runs td { padding: 7px 10px; }
+  table.runs .wf, table.runs .linea { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  td.der, th.der { text-align: right; white-space: nowrap; }
+  td.der .act { color: var(--ok); font-size: 11.5px; font-weight: 600; margin-top: 2px; }
+  td.der .sub { margin-top: 1px; }
   .pulse { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--ok); margin-right: 6px; animation: pu 1.4s infinite; }
   @keyframes pu { 0%,100% { opacity: 1 } 50% { opacity: .25 } }
   #detail { padding: 0 0 14px; display: flex; flex-direction: column; }
@@ -111,19 +169,51 @@
          onkeydown="if (event.key === 'Enter') buscarPrompts()">
   <a class="back" onclick="buscarPrompts()">buscar en prompts</a>
   <span class="hint" id="reloj"></span>
+  <span class="tabs" id="tema" title="tema: auto sigue al sistema operativo">
+    <a onclick="setTema('auto')" data-t="auto">auto</a>
+    <a onclick="setTema('light')" data-t="light">claro</a>
+    <a onclick="setTema('dark')" data-t="dark">oscuro</a>
+  </span>
 </header>
 <div id="offline">Sin conexión con el server — mostrando datos viejos. Si lo bajaste, levantalo de nuevo con el launcher; el dashboard reintenta solo.</div>
 <main>
   <section id="left">
-    <table>
-      <thead><tr><th>Workflow / Run</th><th>Proyecto · Sesión</th><th>Estado</th><th class="num">Agentes</th><th>Últ. act</th></tr></thead>
-      <tbody id="runs"></tbody>
-    </table>
+    <div id="runsWrap">
+      <table class="runs">
+        <colgroup><col><col style="width:118px"></colgroup>
+        <thead><tr><th>Workflow · proyecto · run</th><th class="der">Estado</th></tr></thead>
+        <tbody id="runs"></tbody>
+      </table>
+    </div>
+    <div id="scriptBox"></div>
   </section>
   <section id="detail"><div class="empty">Elegí un run a la izquierda →</div></section>
 </main>
 <script>
 const $ = s => document.querySelector(s);
+
+// -------- tema claro/oscuro --------
+// La preferencia guardada es 'auto' | 'light' | 'dark'. 'auto' se RESUELVE aca a un valor
+// concreto en data-theme, en vez de dejarlo a un @media en el CSS: asi la paleta clara se
+// escribe una sola vez y el boton puede mostrar cual esta activo de verdad.
+const mqClaro = matchMedia("(prefers-color-scheme: light)");
+let temaPref = "auto";
+try { temaPref = localStorage.getItem("wfmon-tema") || "auto"; } catch (e) {}  // modo privado
+
+function aplicarTema() {
+  const efectivo = temaPref === "auto" ? (mqClaro.matches ? "light" : "dark") : temaPref;
+  document.documentElement.dataset.theme = efectivo;
+  const box = $("#tema");
+  if (box) for (const a of box.children) a.classList.toggle("sel", a.dataset.t === temaPref);
+}
+function setTema(t) {
+  temaPref = t;
+  try { localStorage.setItem("wfmon-tema", t); } catch (e) {}
+  aplicarTema();
+}
+mqClaro.addEventListener("change", () => { if (temaPref === "auto") aplicarTema(); });
+aplicarTema();
+
 let runs = [], selRun = null, selAgent = null;
 let proysVistos = "";   // firma del ultimo set de proyectos pintado en #fProy
 let mostrarTerminados = false, tailOn = true;
@@ -190,17 +280,31 @@ function pintarRuns() {
     (!soloAct || r.estado === "ACTIVO" || r.run === selRun) &&
     (!hoy || r.edadSeg < 86400 || r.run === selRun) &&
     (!txt || (r.workflow + r.run + r.sesion + r.proyecto).toLowerCase().includes(txt)));
-  repintar($("#runs"), filas.map(r => `
-    <tr class="row ${r.run===selRun?"sel":""}" data-k="${idsafe(r.run)}" onclick="verRun('${idsafe(r.run)}')">
-      <td><span class="wf">${r.estado==="ACTIVO"?'<span class="pulse"></span>':""}${esc(r.workflow) || "(sin nombre)"}</span><br><span class="sub">${r.run}</span></td>
-      <td>${esc(r.proyecto)}<br><span class="sub">${r.sesion}</span></td>
-      <td><span class="badge b-${r.estado}">${r.estado}</span></td>
-      <td class="num">${r.listos}/${r.agentes}</td>
-      <td>${r.ultimaAct}<br><span class="sub">hace ${fmtEdad(r.edadSeg)}</span></td>
-    </tr>`).join("") || `<tr><td colspan="5" class="empty">Nada con estos filtros${soloAct ? " — destildá “solo activos” para ver el historial" : ""}</td></tr>`);
+  // Dos columnas y no cinco: con cinco, cada celda se partia en tres lineas (el proyecto,
+  // el contador y la fecha) y una fila media 90 px. Lo que no entra se corta con ellipsis
+  // y queda completo en el title.
+  repintar($("#runs"), filas.map(r => {
+    const nombre = esc(r.workflow) || "(sin nombre)";
+    const donde = `${esc(r.proyecto)} · ${r.sesion}`;
+    const cuenta = `${r.listos}/${r.agentes} · ${fmtEdad(r.edadSeg)}`;
+    return `
+    <tr class="row ${r.run===selRun?"sel":""}" data-k="${idsafe(r.run)}" onclick="verRun('${idsafe(r.run)}')"
+        title="${nombre} — ${donde}\n${r.activos} activos · ${r.listos} de ${r.agentes} terminados · última actividad ${r.ultimaAct}">
+      <td>
+        <div class="wf">${r.estado==="ACTIVO"?'<span class="pulse"></span>':""}${nombre}</div>
+        <div class="sub linea">${donde}</div>
+        <div class="sub linea">${r.run}</div>
+      </td>
+      <td class="der">
+        <span class="badge b-${r.estado}">${r.estado}</span>
+        ${r.activos ? `<div class="act">${r.activos} activo${r.activos>1?"s":""}</div>` : ""}
+        <div class="sub">${cuenta}</div>
+      </td>
+    </tr>`; }).join("") || `<tr><td colspan="2" class="empty">Nada con estos filtros${soloAct ? " — destildá “solo activos” para ver el historial" : ""}</td></tr>`);
 }
 
 function verRun(id) {
+  if (id !== selRun) cerrarScript();   // el script abierto es el del run anterior
   selRun = id; selAgent = null; enBusqueda = false; famAbiertas = new Set(); pintarRuns();
   $("#detail").innerHTML = `<div class="head" id="runHead"></div><div id="planBox"></div><div id="agentsBox"></div><div id="feedWrap"></div>`;
   refrescarRun();
@@ -273,6 +377,20 @@ async function refrescarRun() {
   repintar(box, agrupar && fam && !fam.error ? tablaFamilias(fam, d) : tablaAgentes(ags));
 }
 
+// Dos relojes distintos, antes se mostraba solo el segundo y se leia como el primero:
+//   uptimeSeg = desde que el agente arranco (timestamp de su linea 0)
+//   edadSeg   = desde su ultima escritura, o sea cuanto hace que no hace nada
+// Un agente 12 minutos adentro de su trabajo que acaba de escribir decia "hace 0s".
+// uptimeSeg es null mientras la linea 0 todavia no es legible (recien spawneado).
+function tiemposHTML(a) {
+  // El que ya no corre no esta "corriendo 3m ... quieto 2s": duro 3m y cerro hace 2s.
+  const vivo = a.estado === "ACTIVO" || a.estado === "LENTO";
+  const desde = vivo ? `quieto ${fmtEdad(a.edadSeg)}` : `hace ${fmtEdad(a.edadSeg)}`;
+  if (a.uptimeSeg == null) return `<div class="sub">${desde}</div>`;
+  const vida = vivo ? `corriendo ${fmtEdad(a.uptimeSeg)}` : `duró ${fmtEdad(a.uptimeSeg)}`;
+  return `<div class="sub">${vida} · ${desde}</div>`;
+}
+
 function tablaAgentes(ags) {
   return `<table>
     <thead><tr><th>Agente</th><th>Misión</th><th>Estado</th><th class="num">KB</th><th>Actividad actual</th><th></th></tr></thead>
@@ -280,7 +398,7 @@ function tablaAgentes(ags) {
       <tr class="row" data-k="${idsafe(a.id)}" onclick="verAgente('${idsafe(a.id)}')">
         <td class="sub">${a.id.slice(0,10)}</td>
         <td class="mision" title="${esc(a.mision)}">${esc(a.mision)}</td>
-        <td><span class="badge b-${a.estado}">${a.estado}</span> <span class="sub">hace ${fmtEdad(a.edadSeg)}</span></td>
+        <td><span class="badge b-${a.estado}">${a.estado}</span>${tiemposHTML(a)}</td>
         <td class="num">${a.kb}</td>
         <td class="sub">${esc(a.actividad) || "—"}</td>
         <td><a class="back" data-k="p-${idsafe(a.id)}" onclick="event.stopPropagation();abrirPrompt(selRun,'${idsafe(a.id)}')">prompt${a.promptChars ? ` <span class="sub">${kb(a.promptChars)}</span>` : ""}</a></td>
@@ -434,17 +552,31 @@ function pintarPrompt() {
   box.scrollTop = 0;
 }
 
+// El script se abre ABAJO DE LA LISTA DE RUNS, no en el panel derecho: asi se puede leer
+// el script mientras se navegan los agentes, y deja de empujar la tabla hacia abajo.
 async function verScript() {
   if (!selRun) return;
-  const d = await j("/api/script?run=" + encodeURIComponent(selRun));
-  const w = $("#feedWrap");
-  if (!w) return;
-  if (d.error) { w.innerHTML = `<div class="head"><span class="sub">${esc(d.error)}</span></div>`; return; }
-  selAgent = null; vistaAgente = "feed"; promptData = null;
-  w.innerHTML = `<div class="head"><a class="back" onclick="verRun(selRun)">← volver</a>
-      <b>${esc(d.nombre)}</b> <span class="sub">script del workflow · ${kb(d.chars)}</span></div>
-    <pre class="prompt" id="scriptTxt"></pre>`;
-  $("#scriptTxt").textContent = d.texto;
+  const box = $("#scriptBox");
+  if (!box) return;
+  const pedido = selRun;
+  box.innerHTML = `<div class="head"><span class="sub">cargando script…</span></div>`;
+  const d = await j("/api/script?run=" + encodeURIComponent(pedido));
+  if (pedido !== selRun) return;                       // llego tarde: ya hay otro run elegido
+  if (d.error) {
+    box.innerHTML = `<div class="head"><span class="sub">${esc(d.error)}</span>
+      <span class="cerrar" title="cerrar" onclick="cerrarScript()">×</span></div>`;
+    return;
+  }
+  box.innerHTML = `<div class="head"><b title="${esc(d.nombre)}">${esc(d.nombre)}</b>
+      <span class="sub">${kb(d.chars)}</span>
+      <span class="cerrar" title="cerrar" onclick="cerrarScript()">×</span></div>
+    <pre id="scriptTxt"></pre>`;
+  $("#scriptTxt").textContent = d.texto;   // textContent: es codigo literal, nunca innerHTML
+}
+
+function cerrarScript() {
+  const box = $("#scriptBox");
+  if (box) { box.innerHTML = ""; box.__html = ""; }
 }
 
 // -------- busqueda global sobre todos los prompts --------

@@ -68,11 +68,15 @@ def find_run_dir(run_id: str):
 
 
 def _run_row(run: str, workflow: str, project: str, session: str,
-             agents: int, done: int, status: str, mtime: float, now: float) -> dict:
+             agents: int, done: int, active: int, status: str, mtime: float, now: float) -> dict:
     """Canonical shape of one /api/runs row. The only place a row formats ultimaAct
-    (prompt timestamps have their own formatter: fsread._local_ts_label)."""
+    (prompt timestamps have their own formatter: fsread._local_ts_label).
+
+    `listos` and `activos` do NOT add up to `agentes`: a dead agent counts in neither,
+    so the list shows both instead of one ratio that silently hides the difference.
+    """
     return {"run": run, "workflow": workflow, "proyecto": project, "sesion": session,
-            "agentes": agents, "listos": done, "estado": status,
+            "agentes": agents, "listos": done, "activos": active, "estado": status,
             "ultimaAct": datetime.fromtimestamp(mtime).strftime("%d/%m %H:%M"),
             "edadSeg": int(now - mtime)}
 
@@ -102,6 +106,7 @@ def _loose_agent_runs(now: float) -> list[dict]:
             fsread.clean_project_slug(sess.parent.name), sess.name[:8],
             agents=len(mtimes),
             done=sum(1 for t in mtimes if now - t > AGENT_IDLE_SECS),
+            active=sum(1 for t in mtimes if now - t < AGENT_ACTIVE_SECS),
             status="ACTIVO" if now - mtime < RUN_ACTIVE_SECS else "TERMINADO",
             mtime=mtime, now=now))
     return rows
@@ -122,6 +127,10 @@ def _workflow_runs(now: float) -> list[dict]:
             run_dir.name, fsread.workflow_name(run_dir),
             fsread.clean_project_slug(run_dir.parents[3].name), run_dir.parents[2].name[:8],
             agents=len(agents), done=len(ji.done_agents),
+            # Same order of checks as api_run's per-agent status: an agent that just wrote
+            # its result would still look "recent", so done wins over recency.
+            active=sum(1 for a in agents
+                       if a["id"] not in ji.done_agents and now - a["mtime"] < AGENT_ACTIVE_SECS),
             status=run_status(agents, ji.last_type, now), mtime=mtime, now=now))
     return rows
 
@@ -131,6 +140,29 @@ def api_runs() -> list[dict]:
     runs = _loose_agent_runs(now) + _workflow_runs(now)
     runs.sort(key=lambda r: r["edadSeg"])
     return runs
+
+
+def _uptime_secs(entry: dict | None, now: float) -> int | None:
+    """Seconds since the agent was SPAWNED, or None if its line 0 is not readable yet.
+
+    Two different clocks, both needed and previously conflated in the UI: `edadSeg` is
+    now - mtime, i.e. how long the agent has been QUIET (its last write), while this one
+    is how long it has been RUNNING. An agent 12 minutes into its work that just wrote a
+    tool call showed "hace 0s", which reads as "just started".
+
+    The spawn instant is the timestamp of line 0, written at spawn and never rewritten,
+    and prompt_entry has already parsed and cached it: this costs nothing extra.
+    """
+    if not entry:
+        return None
+    try:
+        dt = datetime.fromisoformat(entry["tsIso"].replace("Z", "+00:00"))
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return None
+    try:
+        return max(0, int(now - dt.timestamp()))
+    except (OSError, OverflowError, ValueError):   # a bogus year makes timestamp() blow up
+        return None
 
 
 def api_run(run_id: str) -> dict | None:
@@ -161,6 +193,7 @@ def api_run(run_id: str) -> dict | None:
         e = prompts.prompt_entry(a["path"])
         agents.append({
             "id": a["id"], "kb": a["kb"], "edadSeg": age_secs, "estado": status,
+            "uptimeSeg": _uptime_secs(e, now),   # desde el spawn; edadSeg es desde la ultima escritura
             "mision": prompts.mission_of(e) if e else fsread.agent_mission(a["path"]),
             "promptChars": e["chars"] if e else 0,
             "actividad": "" if status in ("TERMINADO", "REEMPLAZADO") else fsread.agent_activity(a["path"]),
